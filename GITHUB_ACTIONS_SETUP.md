@@ -19,9 +19,17 @@
 
 ## 5) Output
 - Report files are uploaded as Actions artifact:
-  - `monthly-report-YYYYMM`
+  - `monthly-ppt-YYYYMM`
+  - `monthly-summary-<CLIENT_NAME>-YYYYMM`
 
-## 6) Security notes
+## 6) Annual baseline (repo-managed)
+- Path: `config/annual_baseline/<client_name>/<year>.json`
+- Data shape:
+  - `users_total_monthly`: 12 monthly totals (ko+en+cn)
+  - `pageviews_total_monthly`: 12 monthly totals (ko+en+cn)
+- Baseline is managed as a repository file (PR update, typically once per year).
+- Workflow tries to restore previous month summary artifact and passes it to next run.
+
+## 7) Security notes
 - Do not commit `.env` or GA4 key files.
 - Keep `config/ga4-automation-*.json` ignored.
-

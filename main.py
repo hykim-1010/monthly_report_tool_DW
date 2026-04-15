@@ -2,6 +2,7 @@ import argparse
 import json
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 from dotenv import load_dotenv
 from openpyxl import load_workbook
@@ -13,7 +14,6 @@ from google.analytics.data_v1beta.types import (
     RunReportRequest,
 )
 
-import excel_gen
 import ppt_gen
 from ga4_client import (
     fetch_avg_engagement,
@@ -30,6 +30,7 @@ BASE_DIR = Path(__file__).resolve().parent
 CONFIG_PATH = BASE_DIR / "config" / "clients.json"
 TEMPLATES_DIR = BASE_DIR / "templates"
 OUTPUT_DIR = BASE_DIR / "output"
+BASELINE_DIR = BASE_DIR / "config" / "annual_baseline"
 LOG_DIR = BASE_DIR / "logs"
 LOG_PATH = LOG_DIR / "run_log.txt"
 LANGUAGES = ("ko", "en", "cn")
@@ -144,6 +145,141 @@ def resolve_output_path(client_name: str, report_month: str, extension: str) -> 
     return get_client_output_dir(client_name) / build_report_filename(
         client_name, report_month, extension
     )
+
+
+def build_summary_filename(client_name: str, report_month: str) -> str:
+    """월별 summary JSON 파일명을 만든다."""
+    return f"{client_name}_{report_month}_summary.json"
+
+
+def resolve_summary_output_path(client_name: str, report_month: str) -> Path:
+    """고객사/월별 summary JSON 저장 경로를 반환한다."""
+    return get_client_output_dir(client_name) / build_summary_filename(client_name, report_month)
+
+
+def resolve_previous_summary_path(
+    client_name: str,
+    report_month_dt: datetime,
+) -> tuple[Path | None, str]:
+    """
+    전월 summary JSON 경로를 우선순위로 찾는다.
+
+    1) output/{client}/{client}_{prev}_summary.json
+    2) legacy flat output/{client}_{prev}_summary.json
+    """
+    prev_month = format_report_month(get_previous_month(report_month_dt))
+    client_prev_path = resolve_summary_output_path(client_name, prev_month)
+    if client_prev_path.exists():
+        return client_prev_path, "client_output"
+
+    legacy_prev_path = OUTPUT_DIR / build_summary_filename(client_name, prev_month)
+    if legacy_prev_path.exists():
+        return legacy_prev_path, "legacy_output"
+
+    return None, "none"
+
+
+def load_previous_summary(client_name: str, report_month_dt: datetime) -> dict[str, Any] | None:
+    """전월 summary JSON을 로드한다. 없으면 None을 반환한다."""
+    prev_path, _source = resolve_previous_summary_path(client_name, report_month_dt)
+    if prev_path is None:
+        return None
+    with prev_path.open("r", encoding="utf-8") as file:
+        return json.load(file)
+
+
+def _normalize_monthly_totals(values: Any, metric_name: str) -> list[int]:
+    """월별(1~12월) 합계 리스트를 int[12]로 정규화한다."""
+    if not isinstance(values, list) or len(values) != 12:
+        raise ValueError(f"annual baseline '{metric_name}' must be a list with 12 items.")
+    try:
+        return [int(value) for value in values]
+    except (TypeError, ValueError) as exc:
+        raise ValueError(f"annual baseline '{metric_name}' contains a non-integer value.") from exc
+
+
+def load_annual_baseline(client_name: str, report_month_dt: datetime) -> dict[str, Any]:
+    """
+    전년도(보고월 기준 year-1) 월별 합계 baseline을 로드한다.
+
+    파일 형식:
+    {
+      "users_total_monthly": [12개 정수],
+      "pageviews_total_monthly": [12개 정수]
+    }
+    """
+    baseline_year = report_month_dt.year - 1
+    baseline_path = BASELINE_DIR / client_name / f"{baseline_year}.json"
+    if not baseline_path.exists():
+        raise FileNotFoundError(
+            f"annual baseline file not found: client={client_name} "
+            f"baseline_year={baseline_year} path={baseline_path}"
+        )
+
+    with baseline_path.open("r", encoding="utf-8") as file:
+        raw = json.load(file)
+
+    users = _normalize_monthly_totals(raw.get("users_total_monthly"), "users_total_monthly")
+    pageviews = _normalize_monthly_totals(
+        raw.get("pageviews_total_monthly"), "pageviews_total_monthly"
+    )
+    return {
+        "year": baseline_year,
+        "path": str(baseline_path),
+        "users_total_monthly": users,
+        "pageviews_total_monthly": pageviews,
+    }
+
+
+def build_summary_payload(
+    client_name: str,
+    report_month: str,
+    start_raw: str,
+    end_raw: str,
+    data: dict,
+    ppt_base_path: str,
+    ppt_base_source: str,
+    previous_summary: dict[str, Any] | None,
+    annual_baseline: dict[str, Any],
+) -> dict[str, Any]:
+    """월별 summary JSON payload를 만든다."""
+    previous_report_month = (
+        str(previous_summary.get("report_month"))
+        if isinstance(previous_summary, dict) and previous_summary.get("report_month")
+        else None
+    )
+    return {
+        "schema_version": 1,
+        "client": client_name,
+        "report_month": report_month,
+        "period": {"start": start_raw, "end": end_raw},
+        "generated_at": datetime.now().isoformat(timespec="seconds"),
+        "base_sources": {
+            "ppt_base_source": ppt_base_source,
+            "ppt_base_path": ppt_base_path,
+        },
+        "previous_summary": {
+            "loaded": previous_summary is not None,
+            "report_month": previous_report_month,
+        },
+        "annual_baseline": {
+            "loaded": True,
+            "year": annual_baseline["year"],
+            "path": annual_baseline["path"],
+            "users_total_monthly": annual_baseline["users_total_monthly"],
+            "pageviews_total_monthly": annual_baseline["pageviews_total_monthly"],
+        },
+        "data": data,
+    }
+
+
+def write_summary_json(client_name: str, report_month: str, payload: dict[str, Any]) -> str:
+    """월별 summary JSON을 저장하고 저장 경로를 반환한다."""
+    output_path = resolve_summary_output_path(client_name, report_month)
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    with output_path.open("w", encoding="utf-8") as file:
+        json.dump(payload, file, ensure_ascii=False, indent=2)
+    return str(output_path)
 
 
 def resolve_base_report_path(
@@ -442,34 +578,19 @@ def run_report(
     client_output_dir = get_client_output_dir(client_name)
     client_output_dir.mkdir(parents=True, exist_ok=True)
 
-    excel_output_path = resolve_output_path(client_name, report_month, "xlsx")
     ppt_output_path = resolve_output_path(client_name, report_month, "pptx")
-    if excel_output_path.exists() or ppt_output_path.exists():
+    summary_output_path = resolve_summary_output_path(client_name, report_month)
+    if ppt_output_path.exists() or summary_output_path.exists():
         raise FileExistsError(
             f"해당 월 산출물이 이미 존재합니다: {report_month} "
-            f"(excel={excel_output_path.exists()}, ppt={ppt_output_path.exists()})"
+            f"(ppt={ppt_output_path.exists()}, summary={summary_output_path.exists()})"
         )
 
-    excel_base_path, excel_base_source = resolve_base_report_path(
-        client_name=client_name,
-        report_month_dt=report_month_dt,
-        template_filename=client_config["excel_template"],
-        extension="xlsx",
-    )
     ppt_base_path, ppt_base_source = resolve_base_report_path(
         client_name=client_name,
         report_month_dt=report_month_dt,
         template_filename=client_config["ppt_template"],
         extension="pptx",
-    )
-
-    excel_path = excel_gen.write_report(
-        template_path=excel_base_path,
-        output_dir=str(client_output_dir),
-        client_name=client_name,
-        year=year,
-        month=month,
-        data=data,
     )
 
     ppt_path = ppt_gen.write_report(
@@ -483,14 +604,29 @@ def run_report(
         end_date=end_date,
     )
 
+    previous_summary = load_previous_summary(client_name, report_month_dt)
+    annual_baseline = load_annual_baseline(client_name, report_month_dt)
+    summary_payload = build_summary_payload(
+        client_name=client_name,
+        report_month=report_month,
+        start_raw=start_raw,
+        end_raw=end_raw,
+        data=data,
+        ppt_base_path=ppt_base_path,
+        ppt_base_source=ppt_base_source,
+        previous_summary=previous_summary,
+        annual_baseline=annual_baseline,
+    )
+    summary_path = write_summary_json(client_name, report_month, summary_payload)
+
     return {
-        "excel_path": excel_path,
         "ppt_path": ppt_path,
-        "excel_base_path": excel_base_path,
+        "summary_path": summary_path,
         "ppt_base_path": ppt_base_path,
-        "excel_base_source": excel_base_source,
         "ppt_base_source": ppt_base_source,
         "report_month": report_month,
+        "previous_summary_loaded": previous_summary is not None,
+        "annual_baseline_loaded": True,
     }
 
 
@@ -503,14 +639,14 @@ def main() -> None:
         write_log(
             f"SUCCESS client={args.client} start={args.start} end={args.end} "
             f"report_month={result['report_month']} "
-            f"excel={result['excel_path']} ppt={result['ppt_path']} "
-            f"excel_base={result['excel_base_source']}:{result['excel_base_path']} "
-            f"ppt_base={result['ppt_base_source']}:{result['ppt_base_path']}"
+            f"ppt={result['ppt_path']} summary={result['summary_path']} "
+            f"ppt_base={result['ppt_base_source']}:{result['ppt_base_path']} "
+            f"prev_summary_loaded={result['previous_summary_loaded']} "
+            f"annual_baseline_loaded={result['annual_baseline_loaded']}"
         )
         print("보고서 생성이 완료되었습니다.")
-        print(f"Excel: {result['excel_path']}")
         print(f"PPT: {result['ppt_path']}")
-        print(f"Excel base: {result['excel_base_path']} ({result['excel_base_source']})")
+        print(f"Summary: {result['summary_path']}")
         print(f"PPT base: {result['ppt_base_path']} ({result['ppt_base_source']})")
     except Exception as exc:
         write_log(
