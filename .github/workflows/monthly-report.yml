@@ -60,27 +60,7 @@ jobs:
               REPORT_MONTH="${END:0:6}"
             fi
           else
-            python - <<'PY' > "$RUNNER_TEMP/dates.env"
-            from datetime import datetime
-            from zoneinfo import ZoneInfo
-
-            def shift_month(dt: datetime, delta: int) -> datetime:
-                year = dt.year + ((dt.month - 1 + delta) // 12)
-                month = (dt.month - 1 + delta) % 12 + 1
-                return dt.replace(year=year, month=month)
-
-            now = datetime.now(ZoneInfo("Asia/Seoul"))
-            this_month_24 = now.replace(day=24)
-            if now.day >= 25:
-                end_dt = this_month_24
-            else:
-                end_dt = shift_month(this_month_24, -1)
-            start_dt = shift_month(end_dt, -1).replace(day=25)
-
-            print(f"START={start_dt.strftime('%Y%m%d')}")
-            print(f"END={end_dt.strftime('%Y%m%d')}")
-            print(f"REPORT_MONTH={end_dt.strftime('%Y%m')}")
-            PY
+            python -c "from datetime import datetime; from zoneinfo import ZoneInfo; now = datetime.now(ZoneInfo('Asia/Seoul')); this_month_24 = now.replace(day=24); end_dt = this_month_24 if now.day >= 25 else this_month_24.replace(year=this_month_24.year + ((this_month_24.month - 2) // 12), month=((this_month_24.month - 2) % 12) + 1); prev_month = end_dt.replace(year=end_dt.year + ((end_dt.month - 2) // 12), month=((end_dt.month - 2) % 12) + 1); start_dt = prev_month.replace(day=25); print(f'START={start_dt:%Y%m%d}'); print(f'END={end_dt:%Y%m%d}'); print(f'REPORT_MONTH={end_dt:%Y%m}')" > "$RUNNER_TEMP/dates.env"
             source "$RUNNER_TEMP/dates.env"
           fi
 
