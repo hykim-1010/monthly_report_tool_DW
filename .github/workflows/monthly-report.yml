@@ -79,7 +79,7 @@ jobs:
             print(f"START={start_dt.strftime('%Y%m%d')}")
             print(f"END={end_dt.strftime('%Y%m%d')}")
             print(f"REPORT_MONTH={end_dt.strftime('%Y%m')}")
-PY
+            PY
             source "$RUNNER_TEMP/dates.env"
           fi
 
