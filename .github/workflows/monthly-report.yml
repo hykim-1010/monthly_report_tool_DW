@@ -21,12 +21,13 @@ jobs:
     runs-on: ubuntu-latest
     env:
       CLIENT_NAME: ${{ vars.CLIENT_NAME }}
+      FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@v5
 
       - name: Setup Python
-        uses: actions/setup-python@v5
+        uses: actions/setup-python@v6
         with:
           python-version: "3.13"
 
@@ -91,14 +92,25 @@ jobs:
           echo "end=$END" >> "$GITHUB_OUTPUT"
           echo "report_month=$REPORT_MONTH" >> "$GITHUB_OUTPUT"
 
-      - name: Generate report
+      - name: Validate inputs
         shell: bash
         run: |
           set -euo pipefail
+          python --version
           if [[ -z "${CLIENT_NAME:-}" ]]; then
             echo "CLIENT_NAME GitHub variable is not set."
             exit 1
           fi
+          if [[ -z "${START:-}" || -z "${END:-}" || -z "${REPORT_MONTH:-}" ]]; then
+            echo "Resolved dates are missing. START='${START:-}' END='${END:-}' REPORT_MONTH='${REPORT_MONTH:-}'"
+            exit 1
+          fi
+          echo "Resolved values: CLIENT_NAME='$CLIENT_NAME' START='$START' END='$END' REPORT_MONTH='$REPORT_MONTH'"
+
+      - name: Generate report
+        shell: bash
+        run: |
+          set -euo pipefail
           python main.py \
             --client "$CLIENT_NAME" \
             --start "$START" \
