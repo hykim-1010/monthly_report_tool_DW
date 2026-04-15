@@ -14,3 +14,5 @@ logs/
 .DS_Store
 Thumbs.db
 
+# Local progress note
+260403_monthly_report 진행로그.txt
