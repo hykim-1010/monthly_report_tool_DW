@@ -1,0 +1,14 @@
+{
+  "clients": [
+    {
+      "name": "대상웰라이프",
+      "ga4_property_ids": {
+        "ko": "properties/488637045",
+        "en": "properties/491978140",
+        "cn": "properties/492031932"
+      },
+      "excel_template": "운영보고서_data_기본_V1.0_260326.xlsx",
+      "ppt_template": "운영보고서_기본_V1.0_260327.pptx"
+    }
+  ]
+}

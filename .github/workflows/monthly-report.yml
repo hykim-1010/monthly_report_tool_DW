@@ -1,0 +1,113 @@
+name: Monthly GA4 Report
+
+on:
+  schedule:
+    # 11:00 KST on the 26th day of every month (02:00 UTC)
+    - cron: "0 2 26 * *"
+  workflow_dispatch:
+    inputs:
+      start:
+        description: "Start date (YYYYMMDD). Leave blank to auto-calc."
+        required: false
+      end:
+        description: "End date (YYYYMMDD). Leave blank to auto-calc."
+        required: false
+      report_month:
+        description: "Report month (YYYYMM). Leave blank to auto-calc."
+        required: false
+
+jobs:
+  generate-report:
+    runs-on: ubuntu-latest
+    env:
+      CLIENT_NAME: ${{ vars.CLIENT_NAME }}
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.13"
+
+      - name: Install dependencies
+        run: pip install -r requirements.txt
+
+      - name: Write GA4 service account key
+        shell: bash
+        run: |
+          set -euo pipefail
+          KEY_PATH="$RUNNER_TEMP/ga4-service-account.json"
+          printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > "$KEY_PATH"
+          echo "GOOGLE_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
+
+      - name: Resolve report dates
+        id: dates
+        shell: bash
+        run: |
+          set -euo pipefail
+          START_IN="${{ github.event.inputs.start }}"
+          END_IN="${{ github.event.inputs.end }}"
+          REPORT_MONTH_IN="${{ github.event.inputs.report_month }}"
+
+          if [[ -n "$START_IN" && -n "$END_IN" ]]; then
+            START="$START_IN"
+            END="$END_IN"
+            if [[ -n "$REPORT_MONTH_IN" ]]; then
+              REPORT_MONTH="$REPORT_MONTH_IN"
+            else
+              REPORT_MONTH="${END:0:6}"
+            fi
+          else
+            python - <<'PY' > "$RUNNER_TEMP/dates.env"
+from datetime import datetime
+from zoneinfo import ZoneInfo
+
+def shift_month(dt: datetime, delta: int) -> datetime:
+    year = dt.year + ((dt.month - 1 + delta) // 12)
+    month = (dt.month - 1 + delta) % 12 + 1
+    return dt.replace(year=year, month=month)
+
+now = datetime.now(ZoneInfo("Asia/Seoul"))
+this_month_24 = now.replace(day=24)
+if now.day >= 25:
+    end_dt = this_month_24
+else:
+    end_dt = shift_month(this_month_24, -1)
+start_dt = shift_month(end_dt, -1).replace(day=25)
+
+print(f"START={start_dt.strftime('%Y%m%d')}")
+print(f"END={end_dt.strftime('%Y%m%d')}")
+print(f"REPORT_MONTH={end_dt.strftime('%Y%m')}")
+PY
+            source "$RUNNER_TEMP/dates.env"
+          fi
+
+          echo "START=$START" >> "$GITHUB_ENV"
+          echo "END=$END" >> "$GITHUB_ENV"
+          echo "REPORT_MONTH=$REPORT_MONTH" >> "$GITHUB_ENV"
+
+          echo "start=$START" >> "$GITHUB_OUTPUT"
+          echo "end=$END" >> "$GITHUB_OUTPUT"
+          echo "report_month=$REPORT_MONTH" >> "$GITHUB_OUTPUT"
+
+      - name: Generate report
+        shell: bash
+        run: |
+          set -euo pipefail
+          if [[ -z "${CLIENT_NAME:-}" ]]; then
+            echo "CLIENT_NAME GitHub variable is not set."
+            exit 1
+          fi
+          python main.py \
+            --client "$CLIENT_NAME" \
+            --start "$START" \
+            --end "$END" \
+            --report-month "$REPORT_MONTH"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: monthly-report-${{ steps.dates.outputs.report_month }}
+          path: output/**
+          if-no-files-found: error

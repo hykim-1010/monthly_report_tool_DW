@@ -1,0 +1,4 @@
+google-analytics-data
+openpyxl
+python-pptx
+python-dotenv
