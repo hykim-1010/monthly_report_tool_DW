@@ -97,6 +97,7 @@ jobs:
         run: |
           set -euo pipefail
           ARTIFACT_NAME="monthly-summary-${CLIENT_NAME}-${PREV_REPORT_MONTH}"
+          export ARTIFACT_NAME
           DOWNLOAD_URL="$(python -c "import json,os,urllib.request; repo=os.environ['GITHUB_REPOSITORY']; token=os.environ['GITHUB_TOKEN']; name=os.environ['ARTIFACT_NAME']; req=urllib.request.Request(f'https://api.github.com/repos/{repo}/actions/artifacts?per_page=100', headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}); data=json.load(urllib.request.urlopen(req)); arts=[a for a in data.get('artifacts', []) if a.get('name') == name and not a.get('expired', False)]; arts.sort(key=lambda a: a.get('created_at', ''), reverse=True); print(arts[0].get('archive_download_url', '') if arts else '')")"
           if [[ -z "$DOWNLOAD_URL" ]]; then
             echo "No previous summary artifact found for '$ARTIFACT_NAME'."
