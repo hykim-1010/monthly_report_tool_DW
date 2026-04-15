@@ -6,6 +6,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 from openpyxl import load_workbook
+from pptx import Presentation
 from google.analytics.data_v1beta.types import (
     DateRange,
     Dimension,
@@ -280,6 +281,64 @@ def write_summary_json(client_name: str, report_month: str, payload: dict[str, A
     with output_path.open("w", encoding="utf-8") as file:
         json.dump(payload, file, ensure_ascii=False, indent=2)
     return str(output_path)
+
+
+def _set_ppt_table_cell_int(table, row: int, col: int, value: int) -> None:
+    """PPT 테이블 셀 텍스트를 정수 값으로 설정한다(기존 폰트/스타일 최대 유지)."""
+    cell = table.cell(row, col)
+    tf = cell.text_frame
+    display = f"{int(value):,}"
+    if tf.paragraphs:
+        para = tf.paragraphs[0]
+        if para.runs:
+            para.runs[0].text = display
+            for run in para.runs[1:]:
+                run.text = ""
+        else:
+            para.text = display
+    else:
+        tf.text = display
+
+
+def _find_shape_by_name(slide, shape_name: str):
+    """슬라이드에서 지정된 이름의 도형을 찾는다."""
+    for shape in slide.shapes:
+        if shape.name == shape_name:
+            return shape
+    raise ValueError(f"PPT shape '{shape_name}' not found on slide.")
+
+
+def apply_annual_baseline_to_ppt_base(
+    ppt_base_path: str,
+    client_output_dir: Path,
+    report_month: str,
+    annual_baseline: dict[str, Any],
+) -> str:
+    """
+    3p/4p 표의 전년도 실적(열 index 5)에 baseline(월별 합계) 값을 채운
+    임시 base PPT를 생성하고 경로를 반환한다.
+    """
+    prs = Presentation(ppt_base_path)
+    if len(prs.slides) < 4:
+        raise ValueError("PPT template has fewer slides than expected for baseline injection.")
+
+    users_values = annual_baseline["users_total_monthly"]
+    pageviews_values = annual_baseline["pageviews_total_monthly"]
+
+    users_table = _find_shape_by_name(prs.slides[2], "표 6").table
+    pageviews_table = _find_shape_by_name(prs.slides[3], "표 6").table
+
+    for month_idx, value in enumerate(users_values, start=1):
+        _set_ppt_table_cell_int(users_table, month_idx + 1, 5, value)
+    _set_ppt_table_cell_int(users_table, 14, 5, sum(int(v) for v in users_values))
+
+    for month_idx, value in enumerate(pageviews_values, start=1):
+        _set_ppt_table_cell_int(pageviews_table, month_idx + 1, 5, value)
+    _set_ppt_table_cell_int(pageviews_table, 14, 5, sum(int(v) for v in pageviews_values))
+
+    runtime_base_path = client_output_dir / f"_runtime_base_{report_month}.pptx"
+    prs.save(str(runtime_base_path))
+    return str(runtime_base_path)
 
 
 def resolve_base_report_path(
@@ -592,9 +651,16 @@ def run_report(
         template_filename=client_config["ppt_template"],
         extension="pptx",
     )
+    annual_baseline = load_annual_baseline(client_name, report_month_dt)
+    runtime_ppt_base_path = apply_annual_baseline_to_ppt_base(
+        ppt_base_path=ppt_base_path,
+        client_output_dir=client_output_dir,
+        report_month=report_month,
+        annual_baseline=annual_baseline,
+    )
 
     ppt_path = ppt_gen.write_report(
-        template_path=ppt_base_path,
+        template_path=runtime_ppt_base_path,
         output_dir=str(client_output_dir),
         client_name=client_name,
         year=year,
@@ -605,7 +671,6 @@ def run_report(
     )
 
     previous_summary = load_previous_summary(client_name, report_month_dt)
-    annual_baseline = load_annual_baseline(client_name, report_month_dt)
     summary_payload = build_summary_payload(
         client_name=client_name,
         report_month=report_month,
