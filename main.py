@@ -504,6 +504,27 @@ def resolve_base_report_path(
     return resolve_template_path(template_filename), "template"
 
 
+def fetch_summary_safe(
+    property_id: str,
+    start_date: str,
+    end_date: str,
+    *,
+    context: str,
+) -> dict[str, int]:
+    """
+    GA4 summary 조회를 안전하게 수행한다.
+    응답 rows가 비어 IndexError가 발생하면 0 값으로 대체한다.
+    """
+    try:
+        return fetch_summary(property_id, start_date, end_date)
+    except IndexError:
+        write_log(
+            "GA4_EMPTY_SUMMARY "
+            f"context={context} property_id={property_id} start={start_date} end={end_date}"
+        )
+        return {"users": 0, "sessions": 0, "pageviews": 0}
+
+
 def collect_ga4_data(client_config: dict, start_date: str, end_date: str) -> dict:
     """국문/영문/중문 GA4 데이터를 조회해 보고서용 딕셔너리로 조립한다."""
     property_ids = client_config.get("ga4_property_ids", {})
@@ -515,7 +536,12 @@ def collect_ga4_data(client_config: dict, start_date: str, end_date: str) -> dic
     data = {}
     for lang in LANGUAGES:
         property_id = property_ids[lang]
-        summary = fetch_summary(property_id, start_date, end_date)
+        summary = fetch_summary_safe(
+            property_id,
+            start_date,
+            end_date,
+            context=f"current_month_{lang}",
+        )
         channels = fetch_channel_sessions(property_id, start_date, end_date)
         top_pages = fetch_top_pages(property_id, start_date, end_date)
         avg_engagement = fetch_avg_engagement(property_id, start_date, end_date)
@@ -563,7 +589,12 @@ def collect_monthly_summary_series(
 
         month_data: dict[str, dict[str, int]] = {}
         for lang in LANGUAGES:
-            summary = fetch_summary(property_ids[lang], month_start, month_end)
+            summary = fetch_summary_safe(
+                property_ids[lang],
+                month_start,
+                month_end,
+                context=f"monthly_series_{month}_{lang}",
+            )
             month_data[lang] = {
                 "users": int(summary["users"]),
                 "sessions": int(summary["sessions"]),
