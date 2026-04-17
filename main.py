@@ -333,6 +333,90 @@ def _find_shape_by_name(slide, shape_name: str):
     raise ValueError(f"PPT shape '{shape_name}' not found on slide.")
 
 
+def _calc_growth_rate(curr: int, prev: int) -> float | None:
+    """전월 대비 증감율을 계산한다."""
+    if prev == 0:
+        return None
+    return (curr - prev) / prev * 100
+
+
+def _format_growth_rate(rate: float) -> str:
+    """증감율 텍스트를 +x.x% / -x.x% 형식으로 반환한다."""
+    sign = "+" if rate >= 0 else "-"
+    return f"{sign}{abs(rate):.1f}%"
+
+
+def _set_textbox_multiline(slide, shape_name: str, lines: list[str]) -> None:
+    """TextBox 내용을 여러 줄로 교체한다."""
+    shape = _find_shape_by_name(slide, shape_name)
+    tf = shape.text_frame
+    text_lines = lines if lines else [""]
+
+    while len(tf.paragraphs) < len(text_lines):
+        tf.add_paragraph()
+    while len(tf.paragraphs) > len(text_lines):
+        p = tf.paragraphs[-1]._p
+        p.getparent().remove(p)
+
+    for para, line in zip(tf.paragraphs, text_lines):
+        para.text = line
+
+
+def apply_growth_overrides_to_generated_ppt(
+    ppt_path: str,
+    report_month_dt: datetime,
+    monthly_summary_series: dict[int, dict[str, dict[str, int]]],
+) -> None:
+    """
+    생성된 PPT의 3p/4p 증감율(표 col6 + 요약 TextBox 1)을
+    월별 GA4 데이터 기준으로 재계산해 덮어쓴다.
+    """
+    report_month = report_month_dt.month
+    if report_month < 2:
+        return
+
+    curr = monthly_summary_series.get(report_month)
+    prev = monthly_summary_series.get(report_month - 1)
+    if not curr or not prev:
+        return
+
+    prs = Presentation(ppt_path)
+    users_slide = prs.slides[2]
+    pv_slide = prs.slides[3]
+    row_idx = report_month + 1
+
+    def _apply_metric(slide, key: str, metric_name: str) -> None:
+        table = _find_shape_by_name(slide, "표 6").table
+        curr_total = int(curr["ko"][key]) + int(curr["en"][key]) + int(curr["cn"][key])
+        prev_total = int(prev["ko"][key]) + int(prev["en"][key]) + int(prev["cn"][key])
+        total_rate = _calc_growth_rate(curr_total, prev_total)
+        _set_ppt_table_cell_int(
+            table,
+            row_idx,
+            6,
+            0 if total_rate is None else int(round(total_rate * 10)),
+        )
+        if total_rate is None:
+            _set_ppt_table_cell_int(table, row_idx, 6, 0)
+            table.cell(row_idx, 6).text_frame.text = "-"
+        else:
+            table.cell(row_idx, 6).text_frame.text = _format_growth_rate(total_rate)
+
+        lines = []
+        for lang, label in [("ko", "국문"), ("en", "영문"), ("cn", "중문")]:
+            lang_rate = _calc_growth_rate(int(curr[lang][key]), int(prev[lang][key]))
+            if lang_rate is None:
+                lines.append(f"- {label}: 전월 기준 {metric_name} 정보 없음")
+            else:
+                direction = "증가" if lang_rate >= 0 else "감소"
+                lines.append(f"- {label}: 전월 기준 {metric_name} {abs(lang_rate):.0f}% {direction}")
+        _set_textbox_multiline(slide, "TextBox 1", lines)
+
+    _apply_metric(users_slide, "users", "사용자수")
+    _apply_metric(pv_slide, "pageviews", "페이지뷰수")
+    prs.save(ppt_path)
+
+
 def apply_annual_baseline_to_ppt_base(
     ppt_base_path: str,
     client_output_dir: Path,
@@ -772,6 +856,11 @@ def run_report(
         data=data,
         start_date=start_date,
         end_date=end_date,
+    )
+    apply_growth_overrides_to_generated_ppt(
+        ppt_path=ppt_path,
+        report_month_dt=report_month_dt,
+        monthly_summary_series=monthly_summary_series,
     )
 
     previous_summary = load_previous_summary(client_name, report_month_dt)
