@@ -8,6 +8,7 @@ from typing import Any
 from dotenv import load_dotenv
 from openpyxl import load_workbook
 from pptx import Presentation
+from pptx.util import Pt
 from google.analytics.data_v1beta.types import (
     DateRange,
     Dimension,
@@ -205,32 +206,45 @@ def _set_ppt_table_cell_int(
     table,
     row: int,
     col: int,
-    value: int,
+    value: int | str | None,
     *,
     force_bold: bool = False,
+    font_name: str | None = None,
+    font_size_pt: int | None = None,
 ) -> None:
     """PPT 테이블 셀 텍스트를 정수 값으로 설정한다(기존 폰트/스타일 최대 유지)."""
     cell = table.cell(row, col)
     tf = cell.text_frame
-    display = f"{int(value):,}"
+    if value is None:
+        display = "-"
+    elif isinstance(value, str):
+        display = value
+    else:
+        display = f"{int(value):,}"
+
+    def _apply_run_style(run) -> None:
+        if force_bold:
+            run.font.bold = True
+        if font_name:
+            run.font.name = font_name
+        if font_size_pt:
+            run.font.size = Pt(font_size_pt)
     if tf.paragraphs:
         para = tf.paragraphs[0]
         if para.runs:
             para.runs[0].text = display
-            if force_bold:
-                para.runs[0].font.bold = True
+            _apply_run_style(para.runs[0])
             for run in para.runs[1:]:
                 run.text = ""
-                if force_bold:
-                    run.font.bold = True
+                _apply_run_style(run)
         else:
             para.text = display
-            if force_bold and para.runs:
-                para.runs[0].font.bold = True
+            if para.runs:
+                _apply_run_style(para.runs[0])
     else:
         tf.text = display
-        if force_bold and tf.paragraphs and tf.paragraphs[0].runs:
-            tf.paragraphs[0].runs[0].font.bold = True
+        if tf.paragraphs and tf.paragraphs[0].runs:
+            _apply_run_style(tf.paragraphs[0].runs[0])
 
 
 def _find_shape_by_name(slide, shape_name: str):
@@ -268,12 +282,16 @@ def _set_textbox_multiline(slide, shape_name: str, lines: list[str]) -> None:
 
     for para, line in zip(tf.paragraphs, text_lines):
         para.text = line
+        for run in para.runs:
+            run.font.name = "맑은 고딕"
+            run.font.size = Pt(14)
 
 
 def apply_growth_overrides_to_generated_ppt(
     ppt_path: str,
     report_month_dt: datetime,
-    monthly_summary_series: dict[int, dict[str, dict[str, int]]],
+    monthly_summary_series: dict[int, dict[str, dict[str, int | None]]],
+    annual_baseline: dict[str, Any],
 ) -> None:
     """
     생성된 PPT의 3p/4p 증감율(표 col6 + 요약 TextBox 1)을
@@ -293,35 +311,61 @@ def apply_growth_overrides_to_generated_ppt(
     pv_slide = prs.slides[3]
     row_idx = report_month + 1
 
-    def _apply_metric(slide, key: str, metric_name: str) -> None:
+    def _apply_metric(slide, key: str, metric_name: str, baseline_values: list[int]) -> None:
         table = _find_shape_by_name(slide, "표 6").table
-        curr_total = int(curr["ko"][key]) + int(curr["en"][key]) + int(curr["cn"][key])
-        prev_total = int(prev["ko"][key]) + int(prev["en"][key]) + int(prev["cn"][key])
-        total_rate = _calc_growth_rate(curr_total, prev_total)
-        _set_ppt_table_cell_int(
-            table,
-            row_idx,
-            6,
-            0 if total_rate is None else int(round(total_rate * 10)),
+        curr_values = [curr["ko"].get(key), curr["en"].get(key), curr["cn"].get(key)]
+        curr_total = (
+            None
+            if any(value is None for value in curr_values)
+            else int(curr_values[0]) + int(curr_values[1]) + int(curr_values[2])
+        )
+        baseline_month_value = int(baseline_values[report_month - 1])
+        total_rate = (
+            None
+            if curr_total is None
+            else _calc_growth_rate(int(curr_total), baseline_month_value)
         )
         if total_rate is None:
-            _set_ppt_table_cell_int(table, row_idx, 6, 0)
-            table.cell(row_idx, 6).text_frame.text = "-"
+            _set_ppt_table_cell_int(
+                table,
+                row_idx,
+                6,
+                "-",
+                font_name="맑은 고딕",
+                font_size_pt=14,
+            )
         else:
-            table.cell(row_idx, 6).text_frame.text = _format_growth_rate(total_rate)
+            _set_ppt_table_cell_int(
+                table,
+                row_idx,
+                6,
+                _format_growth_rate(total_rate),
+                font_name="맑은 고딕",
+                font_size_pt=14,
+            )
 
         lines = []
         for lang, label in [("ko", "국문"), ("en", "영문"), ("cn", "중문")]:
-            lang_rate = _calc_growth_rate(int(curr[lang][key]), int(prev[lang][key]))
+            curr_lang_value = curr[lang].get(key)
+            prev_lang_value = prev[lang].get(key)
+            if curr_lang_value is None or prev_lang_value is None:
+                lang_rate = None
+            else:
+                lang_rate = _calc_growth_rate(int(curr_lang_value), int(prev_lang_value))
             if lang_rate is None:
-                lines.append(f"- {label}: 전월 기준 {metric_name} 정보 없음")
+                lines.append(f"- {label}: -")
             else:
                 direction = "증가" if lang_rate >= 0 else "감소"
                 lines.append(f"- {label}: 전월 기준 {metric_name} {abs(lang_rate):.0f}% {direction}")
         _set_textbox_multiline(slide, "TextBox 1", lines)
 
-    _apply_metric(users_slide, "users", "사용자수")
-    _apply_metric(pv_slide, "pageviews", "페이지뷰수")
+    _apply_metric(users_slide, "users", "사용자수", annual_baseline["users_total_monthly"])
+    _apply_metric(
+        pv_slide,
+        "pageviews",
+        "페이지뷰수",
+        annual_baseline["pageviews_total_monthly"],
+    )
     prs.save(ppt_path)
 
 
@@ -330,7 +374,7 @@ def apply_annual_baseline_to_ppt_base(
     client_output_dir: Path,
     report_month: str,
     annual_baseline: dict[str, Any],
-    monthly_summary_series: dict[int, dict[str, dict[str, int]]],
+    monthly_summary_series: dict[int, dict[str, dict[str, int | None]]],
 ) -> str:
     """
     3p/4p 표의 전년도 실적(열 index 5)에 baseline(월별 합계) 값을 채운
@@ -365,21 +409,31 @@ def apply_annual_baseline_to_ppt_base(
         row_idx = month_idx + 1
         month_data = monthly_summary_series[month_idx]
 
-        users_ko = int(month_data["ko"]["users"])
-        users_en = int(month_data["en"]["users"])
-        users_cn = int(month_data["cn"]["users"])
+        users_ko = month_data["ko"]["users"]
+        users_en = month_data["en"]["users"]
+        users_cn = month_data["cn"]["users"]
         _set_ppt_table_cell_int(users_table, row_idx, 1, users_ko)
         _set_ppt_table_cell_int(users_table, row_idx, 2, users_en)
         _set_ppt_table_cell_int(users_table, row_idx, 3, users_cn)
-        _set_ppt_table_cell_int(users_table, row_idx, 4, users_ko + users_en + users_cn)
+        users_total = (
+            None
+            if users_ko is None or users_en is None or users_cn is None
+            else int(users_ko) + int(users_en) + int(users_cn)
+        )
+        _set_ppt_table_cell_int(users_table, row_idx, 4, users_total)
 
-        pv_ko = int(month_data["ko"]["pageviews"])
-        pv_en = int(month_data["en"]["pageviews"])
-        pv_cn = int(month_data["cn"]["pageviews"])
+        pv_ko = month_data["ko"]["pageviews"]
+        pv_en = month_data["en"]["pageviews"]
+        pv_cn = month_data["cn"]["pageviews"]
         _set_ppt_table_cell_int(pageviews_table, row_idx, 1, pv_ko)
         _set_ppt_table_cell_int(pageviews_table, row_idx, 2, pv_en)
         _set_ppt_table_cell_int(pageviews_table, row_idx, 3, pv_cn)
-        _set_ppt_table_cell_int(pageviews_table, row_idx, 4, pv_ko + pv_en + pv_cn)
+        pv_total = (
+            None
+            if pv_ko is None or pv_en is None or pv_cn is None
+            else int(pv_ko) + int(pv_en) + int(pv_cn)
+        )
+        _set_ppt_table_cell_int(pageviews_table, row_idx, 4, pv_total)
 
     runtime_base_path = client_output_dir / f"_runtime_base_{report_month}.pptx"
     prs.save(str(runtime_base_path))
@@ -418,19 +472,21 @@ def fetch_summary_safe(
     end_date: str,
     *,
     context: str,
-) -> dict[str, int]:
+) -> dict[str, int | bool]:
     """
     GA4 summary 조회를 안전하게 수행한다.
     응답 rows가 비어 IndexError가 발생하면 0 값으로 대체한다.
     """
     try:
-        return fetch_summary(property_id, start_date, end_date)
+        summary = fetch_summary(property_id, start_date, end_date)
+        summary["_missing"] = False
+        return summary
     except IndexError:
         write_log(
             "GA4_EMPTY_SUMMARY "
             f"context={context} property_id={property_id} start={start_date} end={end_date}"
         )
-        return {"users": 0, "sessions": 0, "pageviews": 0}
+        return {"users": 0, "sessions": 0, "pageviews": 0, "_missing": True}
 
 
 def collect_ga4_data(client_config: dict, start_date: str, end_date: str) -> dict:
@@ -455,7 +511,9 @@ def collect_ga4_data(client_config: dict, start_date: str, end_date: str) -> dic
         avg_engagement = fetch_avg_engagement(property_id, start_date, end_date)
 
         data[lang] = {
-            **summary,
+            "users": int(summary["users"]),
+            "sessions": int(summary["sessions"]),
+            "pageviews": int(summary["pageviews"]),
             "channels": channels,
             "top_pages": top_pages,
             "avg_engagement": avg_engagement,
@@ -469,7 +527,7 @@ def collect_monthly_summary_series(
     start_dt: datetime,
     end_dt: datetime,
     report_month_dt: datetime,
-) -> dict[int, dict[str, dict[str, int]]]:
+) -> dict[int, dict[str, dict[str, int | None]]]:
     """
     1월~보고월까지 월별 GA4 summary(totalUsers/sessions/pageviews)를 수집한다.
 
@@ -488,14 +546,14 @@ def collect_monthly_summary_series(
 
     report_month = report_month_dt.month
     delta_base = report_month - 1
-    monthly_series: dict[int, dict[str, dict[str, int]]] = {}
+    monthly_series: dict[int, dict[str, dict[str, int | None]]] = {}
 
     for month in range(1, report_month + 1):
         delta = month - 1 - delta_base
         month_start = shift_month(start_dt, delta).strftime("%Y-%m-%d")
         month_end = shift_month(end_dt, delta).strftime("%Y-%m-%d")
 
-        month_data: dict[str, dict[str, int]] = {}
+        month_data: dict[str, dict[str, int | None]] = {}
         for lang in LANGUAGES:
             summary = fetch_summary_safe(
                 property_ids[lang],
@@ -503,10 +561,11 @@ def collect_monthly_summary_series(
                 month_end,
                 context=f"monthly_series_{month}_{lang}",
             )
+            is_missing = bool(summary.get("_missing"))
             month_data[lang] = {
-                "users": int(summary["users"]),
-                "sessions": int(summary["sessions"]),
-                "pageviews": int(summary["pageviews"]),
+                "users": None if is_missing else int(summary["users"]),
+                "sessions": None if is_missing else int(summary["sessions"]),
+                "pageviews": None if is_missing else int(summary["pageviews"]),
             }
         monthly_series[month] = month_data
 
@@ -799,6 +858,7 @@ def run_report(
         ppt_path=ppt_path,
         report_month_dt=report_month_dt,
         monthly_summary_series=monthly_summary_series,
+        annual_baseline=annual_baseline,
     )
 
     return {
