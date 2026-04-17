@@ -1,4 +1,5 @@
 import argparse
+import calendar
 import json
 from datetime import datetime
 from pathlib import Path
@@ -100,6 +101,15 @@ def get_previous_month(date_value: datetime) -> datetime:
     if date_value.month == 1:
         return date_value.replace(year=date_value.year - 1, month=12, day=1)
     return date_value.replace(month=date_value.month - 1, day=1)
+
+
+def shift_month(date_value: datetime, delta: int) -> datetime:
+    """월 단위로 이동하되 day는 가능한 범위 내에서 유지한다."""
+    year = date_value.year + ((date_value.month - 1 + delta) // 12)
+    month = (date_value.month - 1 + delta) % 12 + 1
+    max_day = calendar.monthrange(year, month)[1]
+    day = min(date_value.day, max_day)
+    return date_value.replace(year=year, month=month, day=day)
 
 
 def load_client_config(client_name: str) -> dict:
@@ -283,7 +293,14 @@ def write_summary_json(client_name: str, report_month: str, payload: dict[str, A
     return str(output_path)
 
 
-def _set_ppt_table_cell_int(table, row: int, col: int, value: int) -> None:
+def _set_ppt_table_cell_int(
+    table,
+    row: int,
+    col: int,
+    value: int,
+    *,
+    force_bold: bool = False,
+) -> None:
     """PPT 테이블 셀 텍스트를 정수 값으로 설정한다(기존 폰트/스타일 최대 유지)."""
     cell = table.cell(row, col)
     tf = cell.text_frame
@@ -292,12 +309,20 @@ def _set_ppt_table_cell_int(table, row: int, col: int, value: int) -> None:
         para = tf.paragraphs[0]
         if para.runs:
             para.runs[0].text = display
+            if force_bold:
+                para.runs[0].font.bold = True
             for run in para.runs[1:]:
                 run.text = ""
+                if force_bold:
+                    run.font.bold = True
         else:
             para.text = display
+            if force_bold and para.runs:
+                para.runs[0].font.bold = True
     else:
         tf.text = display
+        if force_bold and tf.paragraphs and tf.paragraphs[0].runs:
+            tf.paragraphs[0].runs[0].font.bold = True
 
 
 def _find_shape_by_name(slide, shape_name: str):
@@ -312,7 +337,9 @@ def apply_annual_baseline_to_ppt_base(
     ppt_base_path: str,
     client_output_dir: Path,
     report_month: str,
+    report_month_dt: datetime,
     annual_baseline: dict[str, Any],
+    previous_month_data: dict[str, Any],
 ) -> str:
     """
     3p/4p 표의 전년도 실적(열 index 5)에 baseline(월별 합계) 값을 채운
@@ -329,12 +356,38 @@ def apply_annual_baseline_to_ppt_base(
     pageviews_table = _find_shape_by_name(prs.slides[3], "표 6").table
 
     for month_idx, value in enumerate(users_values, start=1):
-        _set_ppt_table_cell_int(users_table, month_idx + 1, 5, value)
-    _set_ppt_table_cell_int(users_table, 14, 5, sum(int(v) for v in users_values))
+        _set_ppt_table_cell_int(users_table, month_idx + 1, 5, value, force_bold=True)
+    _set_ppt_table_cell_int(users_table, 14, 5, sum(int(v) for v in users_values), force_bold=True)
 
     for month_idx, value in enumerate(pageviews_values, start=1):
-        _set_ppt_table_cell_int(pageviews_table, month_idx + 1, 5, value)
-    _set_ppt_table_cell_int(pageviews_table, 14, 5, sum(int(v) for v in pageviews_values))
+        _set_ppt_table_cell_int(pageviews_table, month_idx + 1, 5, value, force_bold=True)
+    _set_ppt_table_cell_int(
+        pageviews_table,
+        14,
+        5,
+        sum(int(v) for v in pageviews_values),
+        force_bold=True,
+    )
+
+    # 3/4p 증감율은 ppt_gen이 "이전 행(col1~3)"을 기준으로 계산하므로
+    # 해당 이전 행을 전월 GA4 실측값으로 미리 주입한다.
+    if report_month_dt.month >= 2:
+        prev_row_idx = report_month_dt.month
+        prev_users_ko = int(previous_month_data["ko"]["users"])
+        prev_users_en = int(previous_month_data["en"]["users"])
+        prev_users_cn = int(previous_month_data["cn"]["users"])
+        _set_ppt_table_cell_int(users_table, prev_row_idx, 1, prev_users_ko)
+        _set_ppt_table_cell_int(users_table, prev_row_idx, 2, prev_users_en)
+        _set_ppt_table_cell_int(users_table, prev_row_idx, 3, prev_users_cn)
+        _set_ppt_table_cell_int(users_table, prev_row_idx, 4, prev_users_ko + prev_users_en + prev_users_cn)
+
+        prev_pv_ko = int(previous_month_data["ko"]["pageviews"])
+        prev_pv_en = int(previous_month_data["en"]["pageviews"])
+        prev_pv_cn = int(previous_month_data["cn"]["pageviews"])
+        _set_ppt_table_cell_int(pageviews_table, prev_row_idx, 1, prev_pv_ko)
+        _set_ppt_table_cell_int(pageviews_table, prev_row_idx, 2, prev_pv_en)
+        _set_ppt_table_cell_int(pageviews_table, prev_row_idx, 3, prev_pv_cn)
+        _set_ppt_table_cell_int(pageviews_table, prev_row_idx, 4, prev_pv_ko + prev_pv_en + prev_pv_cn)
 
     runtime_base_path = client_output_dir / f"_runtime_base_{report_month}.pptx"
     prs.save(str(runtime_base_path))
@@ -626,9 +679,14 @@ def run_report(
     start_date = format_ga4_date(start_raw)
     end_date = format_ga4_date(end_raw)
     report_month_dt = parse_report_month(report_month_raw) if report_month_raw else end_dt
+    prev_start_dt = shift_month(start_dt, -1)
+    prev_end_dt = shift_month(end_dt, -1)
+    prev_start_date = prev_start_dt.strftime("%Y-%m-%d")
+    prev_end_date = prev_end_dt.strftime("%Y-%m-%d")
 
     client_config = load_client_config(client_name)
     data = collect_ga4_data(client_config, start_date, end_date)
+    previous_month_data = collect_ga4_data(client_config, prev_start_date, prev_end_date)
     apply_slide6_top_pages_override(client_config, start_date, end_date, data)
 
     year = report_month_dt.year
@@ -656,7 +714,9 @@ def run_report(
         ppt_base_path=ppt_base_path,
         client_output_dir=client_output_dir,
         report_month=report_month,
+        report_month_dt=report_month_dt,
         annual_baseline=annual_baseline,
+        previous_month_data=previous_month_data,
     )
 
     ppt_path = ppt_gen.write_report(
