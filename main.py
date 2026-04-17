@@ -337,9 +337,8 @@ def apply_annual_baseline_to_ppt_base(
     ppt_base_path: str,
     client_output_dir: Path,
     report_month: str,
-    report_month_dt: datetime,
     annual_baseline: dict[str, Any],
-    previous_month_data: dict[str, Any],
+    monthly_summary_series: dict[int, dict[str, dict[str, int]]],
 ) -> str:
     """
     3p/4p 표의 전년도 실적(열 index 5)에 baseline(월별 합계) 값을 채운
@@ -369,25 +368,26 @@ def apply_annual_baseline_to_ppt_base(
         force_bold=True,
     )
 
-    # 3/4p 증감율은 ppt_gen이 "이전 행(col1~3)"을 기준으로 계산하므로
-    # 해당 이전 행을 전월 GA4 실측값으로 미리 주입한다.
-    if report_month_dt.month >= 2:
-        prev_row_idx = report_month_dt.month
-        prev_users_ko = int(previous_month_data["ko"]["users"])
-        prev_users_en = int(previous_month_data["en"]["users"])
-        prev_users_cn = int(previous_month_data["cn"]["users"])
-        _set_ppt_table_cell_int(users_table, prev_row_idx, 1, prev_users_ko)
-        _set_ppt_table_cell_int(users_table, prev_row_idx, 2, prev_users_en)
-        _set_ppt_table_cell_int(users_table, prev_row_idx, 3, prev_users_cn)
-        _set_ppt_table_cell_int(users_table, prev_row_idx, 4, prev_users_ko + prev_users_en + prev_users_cn)
+    # 3/4p 월별 누적(1월~보고월) 국/영/중문 + 합계를 GA4 실측값으로 채운다.
+    for month_idx in sorted(monthly_summary_series.keys()):
+        row_idx = month_idx + 1
+        month_data = monthly_summary_series[month_idx]
 
-        prev_pv_ko = int(previous_month_data["ko"]["pageviews"])
-        prev_pv_en = int(previous_month_data["en"]["pageviews"])
-        prev_pv_cn = int(previous_month_data["cn"]["pageviews"])
-        _set_ppt_table_cell_int(pageviews_table, prev_row_idx, 1, prev_pv_ko)
-        _set_ppt_table_cell_int(pageviews_table, prev_row_idx, 2, prev_pv_en)
-        _set_ppt_table_cell_int(pageviews_table, prev_row_idx, 3, prev_pv_cn)
-        _set_ppt_table_cell_int(pageviews_table, prev_row_idx, 4, prev_pv_ko + prev_pv_en + prev_pv_cn)
+        users_ko = int(month_data["ko"]["users"])
+        users_en = int(month_data["en"]["users"])
+        users_cn = int(month_data["cn"]["users"])
+        _set_ppt_table_cell_int(users_table, row_idx, 1, users_ko)
+        _set_ppt_table_cell_int(users_table, row_idx, 2, users_en)
+        _set_ppt_table_cell_int(users_table, row_idx, 3, users_cn)
+        _set_ppt_table_cell_int(users_table, row_idx, 4, users_ko + users_en + users_cn)
+
+        pv_ko = int(month_data["ko"]["pageviews"])
+        pv_en = int(month_data["en"]["pageviews"])
+        pv_cn = int(month_data["cn"]["pageviews"])
+        _set_ppt_table_cell_int(pageviews_table, row_idx, 1, pv_ko)
+        _set_ppt_table_cell_int(pageviews_table, row_idx, 2, pv_en)
+        _set_ppt_table_cell_int(pageviews_table, row_idx, 3, pv_cn)
+        _set_ppt_table_cell_int(pageviews_table, row_idx, 4, pv_ko + pv_en + pv_cn)
 
     runtime_base_path = client_output_dir / f"_runtime_base_{report_month}.pptx"
     prs.save(str(runtime_base_path))
@@ -444,6 +444,50 @@ def collect_ga4_data(client_config: dict, start_date: str, end_date: str) -> dic
         }
 
     return data
+
+
+def collect_monthly_summary_series(
+    client_config: dict,
+    start_dt: datetime,
+    end_dt: datetime,
+    report_month_dt: datetime,
+) -> dict[int, dict[str, dict[str, int]]]:
+    """
+    1월~보고월까지 월별 GA4 summary(totalUsers/sessions/pageviews)를 수집한다.
+
+    반환 형식:
+    {
+      1: {"ko": {"users":.., "sessions":.., "pageviews":..}, "en": {...}, "cn": {...}},
+      ...
+      report_month: {...}
+    }
+    """
+    property_ids = client_config.get("ga4_property_ids", {})
+    missing_languages = [lang for lang in LANGUAGES if not property_ids.get(lang)]
+    if missing_languages:
+        missing = ", ".join(missing_languages)
+        raise ValueError(f"GA4 속성 ID가 비어 있습니다: {missing}")
+
+    report_month = report_month_dt.month
+    delta_base = report_month - 1
+    monthly_series: dict[int, dict[str, dict[str, int]]] = {}
+
+    for month in range(1, report_month + 1):
+        delta = month - 1 - delta_base
+        month_start = shift_month(start_dt, delta).strftime("%Y-%m-%d")
+        month_end = shift_month(end_dt, delta).strftime("%Y-%m-%d")
+
+        month_data: dict[str, dict[str, int]] = {}
+        for lang in LANGUAGES:
+            summary = fetch_summary(property_ids[lang], month_start, month_end)
+            month_data[lang] = {
+                "users": int(summary["users"]),
+                "sessions": int(summary["sessions"]),
+                "pageviews": int(summary["pageviews"]),
+            }
+        monthly_series[month] = month_data
+
+    return monthly_series
 
 
 def _normalize_text(text: str | None) -> str:
@@ -679,14 +723,15 @@ def run_report(
     start_date = format_ga4_date(start_raw)
     end_date = format_ga4_date(end_raw)
     report_month_dt = parse_report_month(report_month_raw) if report_month_raw else end_dt
-    prev_start_dt = shift_month(start_dt, -1)
-    prev_end_dt = shift_month(end_dt, -1)
-    prev_start_date = prev_start_dt.strftime("%Y-%m-%d")
-    prev_end_date = prev_end_dt.strftime("%Y-%m-%d")
 
     client_config = load_client_config(client_name)
     data = collect_ga4_data(client_config, start_date, end_date)
-    previous_month_data = collect_ga4_data(client_config, prev_start_date, prev_end_date)
+    monthly_summary_series = collect_monthly_summary_series(
+        client_config=client_config,
+        start_dt=start_dt,
+        end_dt=end_dt,
+        report_month_dt=report_month_dt,
+    )
     apply_slide6_top_pages_override(client_config, start_date, end_date, data)
 
     year = report_month_dt.year
@@ -714,9 +759,8 @@ def run_report(
         ppt_base_path=ppt_base_path,
         client_output_dir=client_output_dir,
         report_month=report_month,
-        report_month_dt=report_month_dt,
         annual_baseline=annual_baseline,
-        previous_month_data=previous_month_data,
+        monthly_summary_series=monthly_summary_series,
     )
 
     ppt_path = ppt_gen.write_report(
