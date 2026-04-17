@@ -158,47 +158,6 @@ def resolve_output_path(client_name: str, report_month: str, extension: str) -> 
     )
 
 
-def build_summary_filename(client_name: str, report_month: str) -> str:
-    """월별 summary JSON 파일명을 만든다."""
-    return f"{client_name}_{report_month}_summary.json"
-
-
-def resolve_summary_output_path(client_name: str, report_month: str) -> Path:
-    """고객사/월별 summary JSON 저장 경로를 반환한다."""
-    return get_client_output_dir(client_name) / build_summary_filename(client_name, report_month)
-
-
-def resolve_previous_summary_path(
-    client_name: str,
-    report_month_dt: datetime,
-) -> tuple[Path | None, str]:
-    """
-    전월 summary JSON 경로를 우선순위로 찾는다.
-
-    1) output/{client}/{client}_{prev}_summary.json
-    2) legacy flat output/{client}_{prev}_summary.json
-    """
-    prev_month = format_report_month(get_previous_month(report_month_dt))
-    client_prev_path = resolve_summary_output_path(client_name, prev_month)
-    if client_prev_path.exists():
-        return client_prev_path, "client_output"
-
-    legacy_prev_path = OUTPUT_DIR / build_summary_filename(client_name, prev_month)
-    if legacy_prev_path.exists():
-        return legacy_prev_path, "legacy_output"
-
-    return None, "none"
-
-
-def load_previous_summary(client_name: str, report_month_dt: datetime) -> dict[str, Any] | None:
-    """전월 summary JSON을 로드한다. 없으면 None을 반환한다."""
-    prev_path, _source = resolve_previous_summary_path(client_name, report_month_dt)
-    if prev_path is None:
-        return None
-    with prev_path.open("r", encoding="utf-8") as file:
-        return json.load(file)
-
-
 def _normalize_monthly_totals(values: Any, metric_name: str) -> list[int]:
     """월별(1~12월) 합계 리스트를 int[12]로 정규화한다."""
     if not isinstance(values, list) or len(values) != 12:
@@ -240,57 +199,6 @@ def load_annual_baseline(client_name: str, report_month_dt: datetime) -> dict[st
         "users_total_monthly": users,
         "pageviews_total_monthly": pageviews,
     }
-
-
-def build_summary_payload(
-    client_name: str,
-    report_month: str,
-    start_raw: str,
-    end_raw: str,
-    data: dict,
-    ppt_base_path: str,
-    ppt_base_source: str,
-    previous_summary: dict[str, Any] | None,
-    annual_baseline: dict[str, Any],
-) -> dict[str, Any]:
-    """월별 summary JSON payload를 만든다."""
-    previous_report_month = (
-        str(previous_summary.get("report_month"))
-        if isinstance(previous_summary, dict) and previous_summary.get("report_month")
-        else None
-    )
-    return {
-        "schema_version": 1,
-        "client": client_name,
-        "report_month": report_month,
-        "period": {"start": start_raw, "end": end_raw},
-        "generated_at": datetime.now().isoformat(timespec="seconds"),
-        "base_sources": {
-            "ppt_base_source": ppt_base_source,
-            "ppt_base_path": ppt_base_path,
-        },
-        "previous_summary": {
-            "loaded": previous_summary is not None,
-            "report_month": previous_report_month,
-        },
-        "annual_baseline": {
-            "loaded": True,
-            "year": annual_baseline["year"],
-            "path": annual_baseline["path"],
-            "users_total_monthly": annual_baseline["users_total_monthly"],
-            "pageviews_total_monthly": annual_baseline["pageviews_total_monthly"],
-        },
-        "data": data,
-    }
-
-
-def write_summary_json(client_name: str, report_month: str, payload: dict[str, Any]) -> str:
-    """월별 summary JSON을 저장하고 저장 경로를 반환한다."""
-    output_path = resolve_summary_output_path(client_name, report_month)
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    with output_path.open("w", encoding="utf-8") as file:
-        json.dump(payload, file, ensure_ascii=False, indent=2)
-    return str(output_path)
 
 
 def _set_ppt_table_cell_int(
@@ -856,11 +764,10 @@ def run_report(
     client_output_dir.mkdir(parents=True, exist_ok=True)
 
     ppt_output_path = resolve_output_path(client_name, report_month, "pptx")
-    summary_output_path = resolve_summary_output_path(client_name, report_month)
-    if ppt_output_path.exists() or summary_output_path.exists():
+    if ppt_output_path.exists():
         raise FileExistsError(
             f"해당 월 산출물이 이미 존재합니다: {report_month} "
-            f"(ppt={ppt_output_path.exists()}, summary={summary_output_path.exists()})"
+            f"(ppt={ppt_output_path.exists()})"
         )
 
     ppt_base_path, ppt_base_source = resolve_base_report_path(
@@ -894,27 +801,11 @@ def run_report(
         monthly_summary_series=monthly_summary_series,
     )
 
-    previous_summary = load_previous_summary(client_name, report_month_dt)
-    summary_payload = build_summary_payload(
-        client_name=client_name,
-        report_month=report_month,
-        start_raw=start_raw,
-        end_raw=end_raw,
-        data=data,
-        ppt_base_path=ppt_base_path,
-        ppt_base_source=ppt_base_source,
-        previous_summary=previous_summary,
-        annual_baseline=annual_baseline,
-    )
-    summary_path = write_summary_json(client_name, report_month, summary_payload)
-
     return {
         "ppt_path": ppt_path,
-        "summary_path": summary_path,
         "ppt_base_path": ppt_base_path,
         "ppt_base_source": ppt_base_source,
         "report_month": report_month,
-        "previous_summary_loaded": previous_summary is not None,
         "annual_baseline_loaded": True,
     }
 
@@ -928,14 +819,12 @@ def main() -> None:
         write_log(
             f"SUCCESS client={args.client} start={args.start} end={args.end} "
             f"report_month={result['report_month']} "
-            f"ppt={result['ppt_path']} summary={result['summary_path']} "
+            f"ppt={result['ppt_path']} "
             f"ppt_base={result['ppt_base_source']}:{result['ppt_base_path']} "
-            f"prev_summary_loaded={result['previous_summary_loaded']} "
             f"annual_baseline_loaded={result['annual_baseline_loaded']}"
         )
         print("보고서 생성이 완료되었습니다.")
         print(f"PPT: {result['ppt_path']}")
-        print(f"Summary: {result['summary_path']}")
         print(f"PPT base: {result['ppt_base_path']} ({result['ppt_base_source']})")
     except Exception as exc:
         write_log(

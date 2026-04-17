@@ -67,13 +67,10 @@ jobs:
           echo "START=$START" >> "$GITHUB_ENV"
           echo "END=$END" >> "$GITHUB_ENV"
           echo "REPORT_MONTH=$REPORT_MONTH" >> "$GITHUB_ENV"
-          PREV_REPORT_MONTH="$(python -c "from datetime import datetime; dt=datetime.strptime('$REPORT_MONTH','%Y%m'); prev_year=dt.year-1 if dt.month==1 else dt.year; prev_month=12 if dt.month==1 else dt.month-1; print(f'{prev_year}{prev_month:02d}')")"
-          echo "PREV_REPORT_MONTH=$PREV_REPORT_MONTH" >> "$GITHUB_ENV"
 
           echo "start=$START" >> "$GITHUB_OUTPUT"
           echo "end=$END" >> "$GITHUB_OUTPUT"
           echo "report_month=$REPORT_MONTH" >> "$GITHUB_OUTPUT"
-          echo "prev_report_month=$PREV_REPORT_MONTH" >> "$GITHUB_OUTPUT"
 
       - name: Validate inputs
         shell: bash
@@ -90,36 +87,6 @@ jobs:
           fi
           echo "Resolved values: CLIENT_NAME='$CLIENT_NAME' START='$START' END='$END' REPORT_MONTH='$REPORT_MONTH'"
 
-      - name: Restore previous summary artifact (best effort)
-        shell: bash
-        env:
-          GITHUB_TOKEN: ${{ github.token }}
-        run: |
-          set -euo pipefail
-          ARTIFACT_NAME="monthly-summary-${CLIENT_NAME}-${PREV_REPORT_MONTH}"
-          export ARTIFACT_NAME
-          DOWNLOAD_URL="$(python -c "import json,os,urllib.request; repo=os.environ['GITHUB_REPOSITORY']; token=os.environ['GITHUB_TOKEN']; name=os.environ['ARTIFACT_NAME']; req=urllib.request.Request(f'https://api.github.com/repos/{repo}/actions/artifacts?per_page=100', headers={'Authorization':f'Bearer {token}','Accept':'application/vnd.github+json','X-GitHub-Api-Version':'2022-11-28'}); data=json.load(urllib.request.urlopen(req)); arts=[a for a in data.get('artifacts', []) if a.get('name') == name and not a.get('expired', False)]; arts.sort(key=lambda a: a.get('created_at', ''), reverse=True); print(arts[0].get('archive_download_url', '') if arts else '')")"
-          if [[ -z "$DOWNLOAD_URL" ]]; then
-            echo "No previous summary artifact found for '$ARTIFACT_NAME'."
-            exit 0
-          fi
-
-          mkdir -p "output/$CLIENT_NAME"
-          mkdir -p "$RUNNER_TEMP/prev-summary"
-          curl -fsSL \
-            -H "Authorization: Bearer $GITHUB_TOKEN" \
-            -H "Accept: application/vnd.github+json" \
-            -o "$RUNNER_TEMP/previous-summary.zip" \
-            "$DOWNLOAD_URL"
-          unzip -o "$RUNNER_TEMP/previous-summary.zip" -d "$RUNNER_TEMP/prev-summary" >/dev/null
-          FOUND_SUMMARY="$(find "$RUNNER_TEMP/prev-summary" -type f -name "*_${PREV_REPORT_MONTH}_summary.json" | head -n 1 || true)"
-          if [[ -z "$FOUND_SUMMARY" ]]; then
-            echo "Artifact downloaded but previous summary JSON was not found."
-            exit 0
-          fi
-          cp "$FOUND_SUMMARY" "output/$CLIENT_NAME/"
-          echo "Restored previous summary artifact: $ARTIFACT_NAME -> $(basename "$FOUND_SUMMARY")"
-
       - name: Generate report
         shell: bash
         run: |
@@ -135,11 +102,4 @@ jobs:
         with:
           name: monthly-ppt-${{ steps.dates.outputs.report_month }}
           path: output/${{ env.CLIENT_NAME }}/${{ env.CLIENT_NAME }}_${{ steps.dates.outputs.report_month }}_report.pptx
-          if-no-files-found: error
-
-      - name: Upload summary artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: monthly-summary-${{ env.CLIENT_NAME }}-${{ steps.dates.outputs.report_month }}
-          path: output/${{ env.CLIENT_NAME }}/${{ env.CLIENT_NAME }}_${{ steps.dates.outputs.report_month }}_summary.json
           if-no-files-found: error
