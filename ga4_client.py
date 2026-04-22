@@ -12,9 +12,21 @@ from google.oauth2 import service_account
 
 
 def get_ga4_client() -> BetaAnalyticsDataClient:
+    # GitHub Actions: GOOGLE_SERVICE_ACCOUNT_JSON 환경변수에서 직접 읽음
+    key_json = os.getenv("GOOGLE_SERVICE_ACCOUNT_JSON")
+    if key_json:
+        import json
+        info = json.loads(key_json)
+        credentials = service_account.Credentials.from_service_account_info(
+            info,
+            scopes=["https://www.googleapis.com/auth/analytics.readonly"],
+        )
+        return BetaAnalyticsDataClient(credentials=credentials)
+
+    # 로컬: .env의 GOOGLE_KEY_PATH 파일에서 읽음
     key_path = os.getenv("GOOGLE_KEY_PATH")
     if not key_path:
-        raise ValueError("GOOGLE_KEY_PATH가 .env에 설정되지 않았습니다.")
+        raise ValueError("GOOGLE_KEY_PATH 또는 GOOGLE_SERVICE_ACCOUNT_JSON이 설정되지 않았습니다.")
 
     credentials = service_account.Credentials.from_service_account_file(
         key_path,

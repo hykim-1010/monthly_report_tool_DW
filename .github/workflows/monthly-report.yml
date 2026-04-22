@@ -34,14 +34,6 @@ jobs:
       - name: Install dependencies
         run: pip install -r requirements.txt
 
-      - name: Write GA4 service account key
-        shell: bash
-        run: |
-          set -euo pipefail
-          KEY_PATH="$RUNNER_TEMP/ga4-service-account.json"
-          printf '%s' '${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}' > "$KEY_PATH"
-          echo "GOOGLE_KEY_PATH=$KEY_PATH" >> "$GITHUB_ENV"
-
       - name: Resolve report dates
         id: dates
         shell: bash
@@ -89,6 +81,8 @@ jobs:
 
       - name: Generate report
         shell: bash
+        env:
+          GOOGLE_SERVICE_ACCOUNT_JSON: ${{ secrets.GOOGLE_SERVICE_ACCOUNT_JSON }}
         run: |
           set -euo pipefail
           python main.py \
